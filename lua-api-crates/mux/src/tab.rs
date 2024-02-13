@@ -1,4 +1,7 @@
-use config::keyassignment::{PaneDirection, RotationDirection};
+use config::keyassignment::{
+    PaneDirection, RotationDirection, SwapActivePaneDirectionArguments,
+    SwapActivePaneWithIndexArguments,
+};
 
 use super::*;
 use luahelper::mlua::Value;
@@ -172,6 +175,59 @@ impl UserData for MuxTab {
                     ))
                 })?;
                 window.save_and_then_set_active(tab_idx);
+            }
+            Ok(())
+        });
+
+        methods.add_method("swap_active_pane_direction", |_, this, args: Value| {
+            let mux = get_mux()?;
+            let tab = this.resolve(&mux)?;
+
+            let SwapActivePaneDirectionArguments {
+                direction,
+                keep_focus,
+            } = from_lua(args)?;
+
+            if let (Some(active_pane), Some(with_pane_index)) = (
+                tab.get_active_pane(),
+                tab.get_pane_direction(direction, true),
+            ) {
+                let active_pane_id = active_pane.pane_id();
+                promise::spawn::spawn(async move {
+                    let mux = Mux::get();
+                    if let Err(err) = mux
+                        .swap_active_pane_with_index(active_pane_id, with_pane_index, keep_focus)
+                        .await
+                    {
+                        log::error!("Unable to swap active pane in direction: {:#}", err);
+                    }
+                })
+                .detach();
+            }
+            Ok(())
+        });
+
+        methods.add_method("swap_active_pane_with_index", |_, this, args: Value| {
+            let mux = get_mux()?;
+            let tab = this.resolve(&mux)?;
+
+            let SwapActivePaneWithIndexArguments {
+                pane_index,
+                keep_focus,
+            } = from_lua(args)?;
+
+            if let Some(active_pane) = tab.get_active_pane() {
+                let active_pane_id = active_pane.pane_id();
+                promise::spawn::spawn(async move {
+                    let mux = Mux::get();
+                    if let Err(err) = mux
+                        .swap_active_pane_with_index(active_pane_id, pane_index, keep_focus)
+                        .await
+                    {
+                        log::error!("Unable to swap active pane in direction: {:#}", err);
+                    }
+                })
+                .detach();
             }
             Ok(())
         });
