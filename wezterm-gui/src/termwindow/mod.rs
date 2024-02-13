@@ -31,7 +31,7 @@ use ::window::*;
 use anyhow::{anyhow, ensure, Context};
 use config::keyassignment::{
     KeyAssignment, PaneDirection, Pattern, PromptInputLine, QuickSelectArguments, SpawnCommand,
-    SplitSize,
+    SplitSize, SwapActivePaneDirectionArguments, SwapActivePaneWithIndexArguments,
 };
 use config::window::WindowLevel;
 use config::{
@@ -3029,6 +3029,71 @@ impl TermWindow {
                     }
                 })
                 .detach()
+            }
+            SwapActivePaneDirection(SwapActivePaneDirectionArguments {
+                direction,
+                keep_focus,
+            }) => {
+                let mux = Mux::get();
+                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                    Some(tab) => tab,
+                    None => return Ok(PerformAssignmentResult::Handled),
+                };
+
+                let tab_id = tab.tab_id();
+                if self.tab_state(tab_id).overlay.is_none() {
+                    if let (Some(active_pane), Some(with_pane_index)) = (
+                        tab.get_active_pane(),
+                        tab.get_pane_direction(*direction, true),
+                    ) {
+                        let active_pane_id = active_pane.pane_id();
+                        let keep_focus = *keep_focus;
+                        promise::spawn::spawn(async move {
+                            let mux = Mux::get();
+                            if let Err(err) = mux
+                                .swap_active_pane_with_index(
+                                    active_pane_id,
+                                    with_pane_index,
+                                    keep_focus,
+                                )
+                                .await
+                            {
+                                log::error!("Unable to swap active pane in direction: {:#}", err);
+                            }
+                        })
+                        .detach();
+                    }
+                }
+            }
+            SwapActivePaneWithIndex(SwapActivePaneWithIndexArguments {
+                pane_index,
+                keep_focus,
+            }) => {
+                let mux = Mux::get();
+                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                    Some(tab) => tab,
+                    None => return Ok(PerformAssignmentResult::Handled),
+                };
+
+                let tab_id = tab.tab_id();
+
+                if self.tab_state(tab_id).overlay.is_none() {
+                    if let Some(active_pane) = tab.get_active_pane() {
+                        let active_pane_id = active_pane.pane_id();
+                        let pane_index = *pane_index;
+                        let keep_focus = *keep_focus;
+                        promise::spawn::spawn(async move {
+                            let mux = Mux::get();
+                            if let Err(err) = mux
+                                .swap_active_pane_with_index(active_pane_id, pane_index, keep_focus)
+                                .await
+                            {
+                                log::error!("Unable to swap active pane in direction: {:#}", err);
+                            }
+                        })
+                        .detach();
+                    }
+                }
             }
             SplitPane(split) => {
                 log::trace!("SplitPane {:?}", split);
