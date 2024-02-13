@@ -1,8 +1,13 @@
-use config::keyassignment::{PaneDirection, RotationDirection};
+use config::keyassignment::{
+    PaneDirection, RotationDirection, SwapActivePaneDirectionArguments,
+    SwapActivePaneWithIndexArguments,
+};
 
 use super::*;
 use luahelper::mlua::Value;
 use luahelper::{from_lua, to_lua};
+use mux::tab::PaneSwapTarget;
+use std::future::Future;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug)]
@@ -14,16 +19,19 @@ impl MuxTab {
             .ok_or_else(|| mlua::Error::external(format!("tab id {} not found in mux", self.0)))
     }
 
-    async fn rotate_panes(&self, direction: RotationDirection) -> mlua::Result<()> {
+    async fn run_on_mux_thread<F, Fut>(&self, operation: F) -> mlua::Result<()>
+    where
+        F: FnOnce(Arc<Mux>, TabId) -> Fut + Send + 'static,
+        Fut: Future<Output = anyhow::Result<()>> + 'static,
+    {
         let mux = get_mux()?;
         let tab_id = self.0;
         let result = if mux.is_main_thread() {
-            mux.rotate_panes(tab_id, direction).await
+            operation(mux, tab_id).await
         } else {
             promise::spawn::spawn_into_main_thread(async move {
                 // Domain futures are not Send, so create them on the mux thread.
-                promise::spawn::spawn(async move { mux.rotate_panes(tab_id, direction).await })
-                    .await
+                promise::spawn::spawn(async move { operation(mux, tab_id).await }).await
             })
             .await
         };
@@ -127,11 +135,18 @@ impl UserData for MuxTab {
         });
 
         methods.add_async_method("rotate_counter_clockwise", |_, this, _: ()| async move {
-            this.rotate_panes(RotationDirection::CounterClockwise).await
+            this.run_on_mux_thread(|mux, tab_id| async move {
+                mux.rotate_panes(tab_id, RotationDirection::CounterClockwise)
+                    .await
+            })
+            .await
         });
 
         methods.add_async_method("rotate_clockwise", |_, this, _: ()| async move {
-            this.rotate_panes(RotationDirection::Clockwise).await
+            this.run_on_mux_thread(|mux, tab_id| async move {
+                mux.rotate_panes(tab_id, RotationDirection::Clockwise).await
+            })
+            .await
         });
 
         methods.add_method("get_size", |lua, this, _: ()| {
@@ -165,5 +180,37 @@ impl UserData for MuxTab {
             }
             Ok(())
         });
+
+        methods.add_async_method(
+            "swap_active_pane_direction",
+            |_, this, args: Value| async move {
+                let SwapActivePaneDirectionArguments {
+                    direction,
+                    keep_focus,
+                } = from_lua(args)?;
+
+                this.run_on_mux_thread(move |mux, tab_id| async move {
+                    mux.swap_active_pane(tab_id, PaneSwapTarget::Direction(direction), keep_focus)
+                        .await
+                })
+                .await
+            },
+        );
+
+        methods.add_async_method(
+            "swap_active_pane_with_index",
+            |_, this, args: Value| async move {
+                let SwapActivePaneWithIndexArguments {
+                    pane_index,
+                    keep_focus,
+                } = from_lua(args)?;
+
+                this.run_on_mux_thread(move |mux, tab_id| async move {
+                    mux.swap_active_pane(tab_id, PaneSwapTarget::Index(pane_index), keep_focus)
+                        .await
+                })
+                .await
+            },
+        );
     }
 }

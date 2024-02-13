@@ -1,7 +1,7 @@
 use crate::client::{ClientId, ClientInfo};
 use crate::pane::{CachePolicy, Pane, PaneId};
 use crate::ssh_agent::AgentProxy;
-use crate::tab::{SplitRequest, Tab, TabId};
+use crate::tab::{PaneSwapTarget, SplitRequest, Tab, TabId};
 use crate::window::{Window, WindowId};
 use anyhow::{anyhow, Context, Error};
 use config::keyassignment::{RotationDirection, SpawnTabDomain};
@@ -17,7 +17,7 @@ use parking_lot::{
 };
 use percent_encoding::percent_decode_str;
 use portable_pty::{CommandBuilder, ExitStatus, PtySize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryInto;
 use std::io::{Read, Write};
 #[cfg(windows)]
@@ -373,6 +373,16 @@ fn read_from_pane_pty(
 
 lazy_static::lazy_static! {
     static ref MUX: Mutex<Option<Arc<Mux>>> = Mutex::new(None);
+}
+
+#[derive(Default)]
+pub(crate) struct PaneSwapQueue {
+    running: bool,
+    pending: VecDeque<(
+        PaneSwapTarget,
+        bool,
+        smol::channel::Sender<anyhow::Result<()>>,
+    )>,
 }
 
 pub struct MuxWindowBuilder {
@@ -1347,6 +1357,69 @@ impl Mux {
             RotationDirection::CounterClockwise => tab.local_rotate_counter_clockwise(),
         }
         Ok(())
+    }
+
+    pub async fn swap_active_pane(
+        self: &Arc<Self>,
+        tab_id: TabId,
+        target: PaneSwapTarget,
+        keep_focus: bool,
+    ) -> anyhow::Result<()> {
+        let tab = self
+            .get_tab(tab_id)
+            .ok_or_else(|| anyhow!("Invalid tab id {tab_id}"))?;
+        let (reply, result) = smol::channel::bounded(1);
+        let start_worker = {
+            let mut queue = tab.pane_swap_queue.lock();
+            queue.pending.push_back((target, keep_focus, reply));
+            let start = !queue.running;
+            queue.running = true;
+            start
+        };
+
+        if start_worker {
+            let mux = Arc::clone(self);
+            let mut worker = Box::pin(async move {
+                loop {
+                    let (target, keep_focus, reply) = {
+                        let mut queue = tab.pane_swap_queue.lock();
+                        match queue.pending.pop_front() {
+                            Some(request) => request,
+                            None => {
+                                queue.running = false;
+                                return;
+                            }
+                        }
+                    };
+                    if reply.is_closed() {
+                        continue;
+                    }
+                    // FIFO admission keeps targets relative to the preceding resync.
+                    let result = async {
+                        let pane_index = match target {
+                            PaneSwapTarget::Direction(direction) => {
+                                tab.get_pane_direction(direction, true)
+                            }
+                            PaneSwapTarget::Index(index) => Some(index),
+                        };
+                        if let (Some(pane), Some(pane_index)) = (tab.get_active_pane(), pane_index)
+                        {
+                            mux.swap_active_pane_with_index(pane.pane_id(), pane_index, keep_focus)
+                                .await?;
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    reply.try_send(result).ok();
+                }
+            });
+            // Keep local swaps synchronous. Once a remote RPC starts, finish it
+            // and its resync even if the Lua caller stops waiting for the result.
+            if smol::future::poll_once(worker.as_mut()).await.is_none() {
+                promise::spawn::spawn(worker).detach();
+            }
+        }
+        result.recv().await.context("pane swap worker stopped")?
     }
 
     pub async fn swap_active_pane_with_index(

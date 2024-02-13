@@ -20,6 +20,12 @@ pub type Cursor = bintree::Cursor<Arc<dyn Pane>, SplitDirectionAndSize>;
 static TAB_ID: ::std::sync::atomic::AtomicUsize = ::std::sync::atomic::AtomicUsize::new(0);
 pub type TabId = usize;
 
+#[derive(Debug, Clone, Copy)]
+pub enum PaneSwapTarget {
+    Direction(PaneDirection),
+    Index(usize),
+}
+
 #[derive(Default)]
 struct Recency {
     count: usize,
@@ -52,6 +58,7 @@ struct TabInner {
 pub struct Tab {
     inner: Mutex<TabInner>,
     tab_id: TabId,
+    pub(crate) pane_swap_queue: Mutex<crate::PaneSwapQueue>,
 }
 
 #[derive(Clone)]
@@ -513,6 +520,7 @@ impl Tab {
         Self {
             inner: Mutex::new(inner),
             tab_id,
+            pane_swap_queue: Mutex::new(crate::PaneSwapQueue::default()),
         }
     }
 
@@ -2230,6 +2238,7 @@ impl Into<String> for SerdeUrl {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::domain::{Domain, DomainState};
     use crate::renderable::*;
     use parking_lot::{MappedMutexGuard, Mutex};
     use rangeset::RangeSet;
@@ -2238,6 +2247,59 @@ mod test {
     use url::Url;
     use wezterm_term::color::ColorPalette;
     use wezterm_term::{KeyCode, KeyModifiers, Line, MouseEvent, StableRowIndex};
+
+    struct SwapTestDomain(bool);
+
+    #[async_trait::async_trait(?Send)]
+    impl Domain for SwapTestDomain {
+        async fn spawn_pane(
+            &self,
+            _: TerminalSize,
+            _: Option<portable_pty::CommandBuilder>,
+            _: Option<String>,
+        ) -> anyhow::Result<Arc<dyn Pane>> {
+            unreachable!()
+        }
+
+        async fn remote_swap_active_pane_with_index(
+            &self,
+            active_pane_id: PaneId,
+            pane_index: usize,
+            keep_focus: bool,
+        ) -> anyhow::Result<bool> {
+            if self.0 {
+                smol::future::yield_now().await;
+                let mux = Mux::get();
+                let (_, _, tab_id) = mux.resolve_pane_id(active_pane_id).unwrap();
+                mux.get_tab(tab_id).unwrap().local_swap_active_with_index(
+                    active_pane_id,
+                    pane_index,
+                    keep_focus,
+                )?;
+                return Ok(true);
+            }
+            Ok(false)
+        }
+
+        fn domain_id(&self) -> DomainId {
+            1
+        }
+        fn domain_name(&self) -> &str {
+            "swap-test"
+        }
+        fn detachable(&self) -> bool {
+            false
+        }
+        async fn attach(&self, _: Option<WindowId>) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn detach(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn state(&self) -> DomainState {
+            DomainState::Attached
+        }
+    }
 
     struct FakePane {
         id: PaneId,
@@ -2690,6 +2752,104 @@ mod test {
             assert!(events.lock().iter().any(|event| {
                 matches!(event, MuxNotification::TabReflowed(id) if *id == tab.tab_id())
             }));
+        }
+
+        let tab = Arc::new(make_tab());
+        let mut window = crate::window::Window::new(Some("swap-test".into()), None);
+        window.push_tab(&tab);
+        mux.windows.write().insert(window.window_id(), window);
+        mux.add_tab_no_panes(&tab);
+        let executor = promise::spawn::SimpleExecutor::new();
+
+        for delayed in [false, true] {
+            let domain: Arc<dyn Domain> = Arc::new(SwapTestDomain(delayed));
+            mux.add_domain(&domain);
+            let mut scenario = Box::pin(async {
+                let mut first = Box::pin(mux.swap_active_pane(
+                    tab.tab_id(),
+                    PaneSwapTarget::Direction(PaneDirection::Right),
+                    true,
+                ));
+                let result = smol::future::poll_once(first.as_mut()).await;
+                assert_eq!(result.is_none(), delayed);
+                let mut second = Box::pin(mux.swap_active_pane(
+                    tab.tab_id(),
+                    PaneSwapTarget::Direction(PaneDirection::Right),
+                    true,
+                ));
+                if let Some(result) = result {
+                    result.unwrap();
+                } else {
+                    assert!(smol::future::poll_once(second.as_mut()).await.is_none());
+                    assert_eq!(pane_ids(&tab), [1, 2, 3]);
+                    executor.tick().unwrap();
+                }
+                assert_eq!(pane_ids(&tab), [2, 1, 3]);
+
+                // A new request must not overtake the already waiting second swap.
+                let mut third =
+                    Box::pin(mux.swap_active_pane(tab.tab_id(), PaneSwapTarget::Index(0), true));
+                if delayed {
+                    assert!(smol::future::poll_once(third.as_mut()).await.is_none());
+                    first.await.unwrap();
+                }
+                second.await.unwrap();
+                third.await.unwrap();
+                assert_eq!(pane_ids(&tab), [1, 3, 2]);
+                mux.swap_active_pane(tab.tab_id(), PaneSwapTarget::Index(2), true)
+                    .await
+                    .unwrap();
+                for _ in 0..2 {
+                    mux.swap_active_pane(
+                        tab.tab_id(),
+                        PaneSwapTarget::Direction(PaneDirection::Left),
+                        true,
+                    )
+                    .await
+                    .unwrap();
+                }
+                assert_eq!(pane_ids(&tab), [1, 2, 3]);
+
+                // Indexed swaps must also use the new active pane on each call.
+                for expected_active in [2, 1] {
+                    mux.swap_active_pane(tab.tab_id(), PaneSwapTarget::Index(1), false)
+                        .await
+                        .unwrap();
+                    assert_eq!(tab.get_active_pane().unwrap().pane_id(), expected_active);
+                }
+                assert_eq!(pane_ids(&tab), [1, 2, 3]);
+
+                if delayed {
+                    // Dropping an in-flight caller must not abandon its operation.
+                    let mut cancelled = Box::pin(mux.swap_active_pane(
+                        tab.tab_id(),
+                        PaneSwapTarget::Index(1),
+                        false,
+                    ));
+                    assert!(smol::future::poll_once(cancelled.as_mut()).await.is_none());
+                    drop(cancelled);
+
+                    // A request cancelled before it starts should be skipped.
+                    let mut cancelled_queued = Box::pin(mux.swap_active_pane(
+                        tab.tab_id(),
+                        PaneSwapTarget::Index(2),
+                        false,
+                    ));
+                    assert!(smol::future::poll_once(cancelled_queued.as_mut())
+                        .await
+                        .is_none());
+                    drop(cancelled_queued);
+
+                    mux.swap_active_pane(tab.tab_id(), PaneSwapTarget::Index(1), false)
+                        .await
+                        .unwrap();
+                    assert_eq!(pane_ids(&tab), [1, 2, 3]);
+                    assert_eq!(tab.get_active_pane().unwrap().pane_id(), 1);
+                }
+            });
+            while smol::block_on(smol::future::poll_once(scenario.as_mut())).is_none() {
+                executor.tick().unwrap();
+            }
         }
     }
 

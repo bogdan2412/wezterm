@@ -32,7 +32,8 @@ use ::window::*;
 use anyhow::{anyhow, ensure, Context};
 use config::keyassignment::{
     Confirmation, KeyAssignment, LauncherActionArgs, PaneDirection, Pattern, PromptInputLine,
-    QuickSelectArguments, SpawnCommand, SplitSize,
+    QuickSelectArguments, SpawnCommand, SplitSize, SwapActivePaneDirectionArguments,
+    SwapActivePaneWithIndexArguments,
 };
 use config::window::WindowLevel;
 use config::{
@@ -46,8 +47,8 @@ use mux::pane::{
 };
 use mux::renderable::RenderableDimensions;
 use mux::tab::{
-    PositionedPane, PositionedSplit, SplitDirection, SplitRequest, SplitSize as MuxSplitSize, Tab,
-    TabId,
+    PaneSwapTarget, PositionedPane, PositionedSplit, SplitDirection, SplitRequest,
+    SplitSize as MuxSplitSize, Tab, TabId,
 };
 use mux::window::WindowId as MuxWindowId;
 use mux::{Mux, MuxNotification};
@@ -2581,6 +2582,29 @@ impl TermWindow {
         self.move_tab(tab)
     }
 
+    fn swap_active_pane(
+        &mut self,
+        tab_id: TabId,
+        target: PaneSwapTarget,
+        keep_focus: bool,
+    ) -> anyhow::Result<()> {
+        let mux = Mux::get();
+        let mut operation =
+            Box::pin(async move { mux.swap_active_pane(tab_id, target, keep_focus).await });
+        // Preserve synchronous local actions without blocking on remote domains.
+        if let Some(result) = smol::block_on(smol::future::poll_once(operation.as_mut())) {
+            return result;
+        }
+
+        promise::spawn::spawn(async move {
+            if let Err(err) = operation.await {
+                log::error!("Unable to swap active pane: {err:#}");
+            }
+        })
+        .detach();
+        Ok(())
+    }
+
     pub fn perform_key_assignment(
         &mut self,
         pane: &Arc<dyn Pane>,
@@ -3113,6 +3137,41 @@ impl TermWindow {
                     }
                 })
                 .detach()
+            }
+            SwapActivePaneDirection(SwapActivePaneDirectionArguments {
+                direction,
+                keep_focus,
+            }) => {
+                let mux = Mux::get();
+                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                    Some(tab) => tab,
+                    None => return Ok(PerformAssignmentResult::Handled),
+                };
+
+                let tab_id = tab.tab_id();
+                if self.tab_state(tab_id).overlay.is_none() {
+                    self.swap_active_pane(
+                        tab_id,
+                        PaneSwapTarget::Direction(*direction),
+                        *keep_focus,
+                    )?;
+                }
+            }
+            SwapActivePaneWithIndex(SwapActivePaneWithIndexArguments {
+                pane_index,
+                keep_focus,
+            }) => {
+                let mux = Mux::get();
+                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                    Some(tab) => tab,
+                    None => return Ok(PerformAssignmentResult::Handled),
+                };
+
+                let tab_id = tab.tab_id();
+
+                if self.tab_state(tab_id).overlay.is_none() {
+                    self.swap_active_pane(tab_id, PaneSwapTarget::Index(*pane_index), *keep_focus)?;
+                }
             }
             SplitPane(split) => {
                 log::trace!("SplitPane {:?}", split);
