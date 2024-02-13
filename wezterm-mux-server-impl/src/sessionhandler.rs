@@ -639,6 +639,50 @@ impl SessionHandler {
                 .detach();
             }
 
+            Pdu::SwapActivePaneWithIndex(SwapActivePaneWithIndex {
+                active_pane_id,
+                with_pane_index,
+                keep_focus,
+            }) => {
+                spawn_into_main_thread(async move {
+                    promise::spawn::spawn(async move {
+                        let result = async {
+                            let mux = Mux::get();
+                            mux.swap_active_pane_with_index(
+                                active_pane_id,
+                                with_pane_index,
+                                keep_focus,
+                            )
+                            .await?;
+                            Ok(Pdu::UnitResponse(UnitResponse {}))
+                        }
+                        .await;
+                        send_response(result);
+                    })
+                    .detach();
+                })
+                .detach();
+            }
+
+            Pdu::RotatePanes(RotatePanes { pane_id, direction }) => {
+                spawn_into_main_thread(async move {
+                    promise::spawn::spawn(async move {
+                        let result = async {
+                            let mux = Mux::get();
+                            let (_domain_id, _window_id, tab_id) = mux
+                                .resolve_pane_id(pane_id)
+                                .ok_or_else(|| anyhow!("no such pane {}", pane_id))?;
+                            mux.rotate_panes(tab_id, direction).await?;
+                            Ok(Pdu::UnitResponse(UnitResponse {}))
+                        }
+                        .await;
+                        send_response(result);
+                    })
+                    .detach();
+                })
+                .detach();
+            }
+
             Pdu::Resize(Resize {
                 containing_tab_id,
                 pane_id,
@@ -1014,7 +1058,7 @@ impl SessionHandler {
             | Pdu::GetClientListResponse { .. }
             | Pdu::PaneRemoved { .. }
             | Pdu::PaneFocused { .. }
-            | Pdu::TabResized { .. }
+            | Pdu::TabReflowed { .. }
             | Pdu::GetImageCellResponse { .. }
             | Pdu::MovePaneToNewTabResponse { .. }
             | Pdu::TabAddedToWindow { .. }

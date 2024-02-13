@@ -581,12 +581,12 @@ impl Tab {
         self.inner.lock().iter_panes_ignoring_zoom()
     }
 
-    pub fn rotate_counter_clockwise(&self) {
-        self.inner.lock().rotate_counter_clockwise()
+    pub fn local_rotate_counter_clockwise(&self) {
+        self.inner.lock().local_rotate_counter_clockwise()
     }
 
-    pub fn rotate_clockwise(&self) {
-        self.inner.lock().rotate_clockwise()
+    pub fn local_rotate_clockwise(&self) {
+        self.inner.lock().local_rotate_clockwise()
     }
 
     pub fn iter_splits(&self) -> Vec<PositionedSplit> {
@@ -714,10 +714,15 @@ impl Tab {
     }
 
     /// Swap the active pane with the specified pane_index
-    pub fn swap_active_with_index(&self, pane_index: usize, keep_focus: bool) -> Option<()> {
+    pub fn local_swap_active_with_index(
+        &self,
+        active_pane_id: PaneId,
+        pane_index: usize,
+        keep_focus: bool,
+    ) -> anyhow::Result<()> {
         self.inner
             .lock()
-            .swap_active_with_index(pane_index, keep_focus)
+            .local_swap_active_with_index(active_pane_id, pane_index, keep_focus)
     }
 
     /// Computes the size of the pane that would result if the specified
@@ -908,7 +913,7 @@ impl TabInner {
                 self.zoomed.replace(pane);
             }
         }
-        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
+        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabReflowed(self.id)));
     }
 
     fn contains_pane(&self, pane: PaneId) -> bool {
@@ -937,13 +942,15 @@ impl TabInner {
         self.iter_panes_impl(false)
     }
 
-    fn rotate_counter_clockwise(&mut self) {
+    fn local_rotate_counter_clockwise(&mut self) {
         let panes = self.iter_panes_ignoring_zoom();
         if panes.is_empty() {
             // Shouldn't happen, but we check for this here so that the
             // expect below cannot trigger a panic
             return;
         }
+        let was_zoomed = self.set_zoomed(false);
+        let prior = self.get_active_pane();
         let mut pane_to_swap = panes
             .first()
             .map(|p| p.pane.clone())
@@ -966,15 +973,20 @@ impl TabInner {
                 }
             }
         }
+        self.advise_focus_change(prior);
+        self.set_zoomed(was_zoomed);
+        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabReflowed(self.id)));
     }
 
-    fn rotate_clockwise(&mut self) {
+    fn local_rotate_clockwise(&mut self) {
         let panes = self.iter_panes_ignoring_zoom();
         if panes.is_empty() {
             // Shouldn't happen, but we check for this here so that the
             // expect below cannot trigger a panic
             return;
         }
+        let was_zoomed = self.set_zoomed(false);
+        let prior = self.get_active_pane();
         let mut pane_to_swap = panes
             .last()
             .map(|p| p.pane.clone())
@@ -997,7 +1009,9 @@ impl TabInner {
                 }
             }
         }
-        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
+        self.advise_focus_change(prior);
+        self.set_zoomed(was_zoomed);
+        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabReflowed(self.id)));
     }
 
     fn iter_panes_impl(&mut self, respect_zoom_state: bool) -> Vec<PositionedPane> {
@@ -1179,7 +1193,7 @@ impl TabInner {
             apply_sizes_from_splits(self.pane.as_mut().unwrap(), &size);
         }
 
-        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
+        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabReflowed(self.id)));
     }
 
     fn apply_pane_size(&mut self, pane_size: TerminalSize, cursor: &mut Cursor) {
@@ -1255,7 +1269,7 @@ impl TabInner {
                 self.size = size;
             }
         }
-        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
+        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabReflowed(self.id)));
     }
 
     fn resize_split_by(&mut self, split_index: usize, delta: isize) {
@@ -1288,7 +1302,7 @@ impl TabInner {
         // Now cursor is looking at the split
         self.adjust_node_at_cursor(&mut cursor, delta);
         self.cascade_size_from_cursor(cursor);
-        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
+        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabReflowed(self.id)));
     }
 
     fn adjust_node_at_cursor(&mut self, cursor: &mut Cursor, delta: isize) {
@@ -1371,7 +1385,7 @@ impl TabInner {
                 }
             }
         }
-        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
+        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabReflowed(self.id)));
     }
 
     fn adjust_pane_size(&mut self, direction: PaneDirection, amount: usize) {
@@ -1812,9 +1826,25 @@ impl TabInner {
         cell_dimensions(&self.size)
     }
 
-    fn swap_active_with_index(&mut self, pane_index: usize, keep_focus: bool) -> Option<()> {
+    fn local_swap_active_with_index(
+        &mut self,
+        active_pane_id: PaneId,
+        pane_index: usize,
+        keep_focus: bool,
+    ) -> anyhow::Result<()> {
         let active_idx = self.get_active_idx();
-        let mut pane = self.get_active_pane()?;
+        let active_pane = self
+            .get_active_pane()
+            .ok_or_else(|| anyhow::anyhow!("tab {} has no active pane", self.id))?;
+        anyhow::ensure!(
+            active_pane.pane_id() == active_pane_id,
+            "active pane changed before swapping pane {active_pane_id}"
+        );
+        if pane_index == active_idx || pane_index >= self.iter_panes_ignoring_zoom().len() {
+            return Ok(());
+        }
+        let was_zoomed = self.set_zoomed(false);
+        let mut pane = Arc::clone(&active_pane);
         log::trace!(
             "swap_active_with_index: pane_index {} active {}",
             pane_index,
@@ -1830,7 +1860,7 @@ impl TabInner {
                 Err(c) => {
                     log::trace!("didn't find pane {pane_index}");
                     self.pane.replace(c.tree());
-                    return None;
+                    return Ok(());
                 }
             };
 
@@ -1845,7 +1875,7 @@ impl TabInner {
                 Err(c) => {
                     self.pane.replace(c.tree());
                     log::trace!("didn't find active {active_idx}");
-                    return None;
+                    return Ok(());
                 }
             };
 
@@ -1859,11 +1889,13 @@ impl TabInner {
 
         // And update focus
         if keep_focus {
-            self.set_active_idx(pane_index);
-        } else {
-            self.advise_focus_change(Some(pane));
+            self.active = pane_index;
+            self.recency.tag(pane_index);
         }
-        None
+        self.advise_focus_change(Some(active_pane));
+        self.set_zoomed(was_zoomed);
+        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabReflowed(self.id)));
+        Ok(())
     }
 
     fn compute_split_size(
@@ -2210,6 +2242,7 @@ mod test {
     struct FakePane {
         id: PaneId,
         size: Mutex<TerminalSize>,
+        focus_events: Mutex<Vec<bool>>,
     }
 
     impl FakePane {
@@ -2217,11 +2250,16 @@ mod test {
             Arc::new(Self {
                 id,
                 size: Mutex::new(size),
+                focus_events: Mutex::new(Vec::new()),
             })
         }
     }
 
     impl Pane for FakePane {
+        fn focus_changed(&self, focused: bool) {
+            self.focus_events.lock().push(focused);
+        }
+
         fn pane_id(&self) -> PaneId {
             self.id
         }
@@ -2515,6 +2553,144 @@ mod test {
         assert_eq!(24, panes[2].height);
         assert_eq!(400, panes[2].pixel_width);
         assert_eq!(600, panes[2].pixel_height);
+    }
+
+    #[test]
+    fn pane_reordering() {
+        struct RestoreMux(Option<Arc<Mux>>);
+        impl Drop for RestoreMux {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(mux) => Mux::set_mux(mux),
+                    None => Mux::shutdown(),
+                }
+            }
+        }
+        let _restore = RestoreMux(Mux::try_get());
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        mux.subscribe({
+            let events = Arc::clone(&events);
+            move |event| {
+                events.lock().push(event);
+                true
+            }
+        });
+
+        let size = TerminalSize {
+            rows: 24,
+            cols: 81,
+            pixel_width: 810,
+            pixel_height: 600,
+            dpi: 96,
+        };
+        let make_tab = || {
+            let tab = Tab::new(&size);
+            tab.assign_pane(&FakePane::new(1, size));
+            for index in 0..2 {
+                tab.split_and_insert(
+                    index,
+                    SplitRequest {
+                        direction: SplitDirection::Horizontal,
+                        ..Default::default()
+                    },
+                    FakePane::new(index + 2, size),
+                )
+                .unwrap();
+            }
+            tab.set_active_idx(0);
+            tab
+        };
+        let pane_ids = |tab: &Tab| {
+            tab.iter_panes_ignoring_zoom()
+                .iter()
+                .map(|p| p.pane.pane_id())
+                .collect::<Vec<_>>()
+        };
+
+        for zoomed in [false, true] {
+            for keep_focus in [false, true] {
+                let tab = make_tab();
+                tab.set_zoomed(zoomed);
+                let panes = tab.iter_panes_ignoring_zoom();
+                for pos in &panes {
+                    pos.pane
+                        .downcast_ref::<FakePane>()
+                        .unwrap()
+                        .focus_events
+                        .lock()
+                        .clear();
+                }
+                events.lock().clear();
+
+                // Stale requests must not silently swap a different source pane.
+                assert!(tab.local_swap_active_with_index(2, 1, keep_focus).is_err());
+                tab.local_swap_active_with_index(1, usize::MAX, keep_focus)
+                    .unwrap();
+                tab.local_swap_active_with_index(1, 0, keep_focus).unwrap();
+                assert_eq!(pane_ids(&tab), [1, 2, 3]);
+                assert!(events.lock().is_empty());
+
+                tab.local_swap_active_with_index(1, 1, keep_focus).unwrap();
+                assert_eq!(pane_ids(&tab), [2, 1, 3]);
+                let active_id = if keep_focus { 1 } else { 2 };
+                assert_eq!(tab.get_active_pane().unwrap().pane_id(), active_id);
+                assert!(events.lock().iter().any(|event| {
+                    matches!(event, MuxNotification::TabReflowed(id) if *id == tab.tab_id())
+                }));
+                for (index, pos) in panes.iter().enumerate() {
+                    let expected = if keep_focus || index == 2 {
+                        vec![]
+                    } else {
+                        vec![index == 1]
+                    };
+                    assert_eq!(
+                        *pos.pane
+                            .downcast_ref::<FakePane>()
+                            .unwrap()
+                            .focus_events
+                            .lock(),
+                        expected
+                    );
+                }
+                if zoomed {
+                    let pane = tab.get_zoomed_pane().unwrap();
+                    assert_eq!(pane.pane_id(), active_id);
+                    assert_eq!(*pane.downcast_ref::<FakePane>().unwrap().size.lock(), size);
+                }
+
+                // A second zoomed swap previously duplicated one pane in the tree.
+                tab.local_swap_active_with_index(
+                    active_id,
+                    if keep_focus { 0 } else { 1 },
+                    keep_focus,
+                )
+                .unwrap();
+                assert_eq!(pane_ids(&tab), [1, 2, 3]);
+                assert_eq!(tab.get_active_pane().unwrap().pane_id(), 1);
+                assert_eq!(tab.get_zoomed_pane().is_some(), zoomed);
+            }
+
+            let tab = make_tab();
+            tab.set_zoomed(zoomed);
+            events.lock().clear();
+            tab.local_rotate_clockwise();
+            assert_eq!(pane_ids(&tab), [3, 1, 2]);
+            assert_eq!(tab.get_active_pane().unwrap().pane_id(), 3);
+            if zoomed {
+                let pane = tab.get_zoomed_pane().unwrap();
+                assert_eq!(pane.pane_id(), 3);
+                assert_eq!(*pane.downcast_ref::<FakePane>().unwrap().size.lock(), size);
+            }
+            tab.local_rotate_counter_clockwise();
+            assert_eq!(pane_ids(&tab), [1, 2, 3]);
+            assert_eq!(tab.get_active_pane().unwrap().pane_id(), 1);
+            assert_eq!(tab.get_zoomed_pane().is_some(), zoomed);
+            assert!(events.lock().iter().any(|event| {
+                matches!(event, MuxNotification::TabReflowed(id) if *id == tab.tab_id())
+            }));
+        }
     }
 
     fn is_send_and_sync<T: Send + Sync>() -> bool {

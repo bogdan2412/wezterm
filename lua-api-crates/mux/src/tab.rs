@@ -1,4 +1,4 @@
-use config::keyassignment::PaneDirection;
+use config::keyassignment::{PaneDirection, RotationDirection};
 
 use super::*;
 use luahelper::mlua::Value;
@@ -12,6 +12,22 @@ impl MuxTab {
     pub fn resolve<'a>(&self, mux: &'a Arc<Mux>) -> mlua::Result<Arc<Tab>> {
         mux.get_tab(self.0)
             .ok_or_else(|| mlua::Error::external(format!("tab id {} not found in mux", self.0)))
+    }
+
+    async fn rotate_panes(&self, direction: RotationDirection) -> mlua::Result<()> {
+        let mux = get_mux()?;
+        let tab_id = self.0;
+        let result = if mux.is_main_thread() {
+            mux.rotate_panes(tab_id, direction).await
+        } else {
+            promise::spawn::spawn_into_main_thread(async move {
+                // Domain futures are not Send, so create them on the mux thread.
+                promise::spawn::spawn(async move { mux.rotate_panes(tab_id, direction).await })
+                    .await
+            })
+            .await
+        };
+        result.map_err(|err| mlua::Error::external(format!("{err:#}")))
     }
 }
 
@@ -110,18 +126,12 @@ impl UserData for MuxTab {
             Ok(result)
         });
 
-        methods.add_method("rotate_counter_clockwise", |_, this, _: ()| {
-            let mux = get_mux()?;
-            let tab = this.resolve(&mux)?;
-            tab.rotate_counter_clockwise();
-            Ok(())
+        methods.add_async_method("rotate_counter_clockwise", |_, this, _: ()| async move {
+            this.rotate_panes(RotationDirection::CounterClockwise).await
         });
 
-        methods.add_method("rotate_clockwise", |_, this, _: ()| {
-            let mux = get_mux()?;
-            let tab = this.resolve(&mux)?;
-            tab.rotate_counter_clockwise();
-            Ok(())
+        methods.add_async_method("rotate_clockwise", |_, this, _: ()| async move {
+            this.rotate_panes(RotationDirection::Clockwise).await
         });
 
         methods.add_method("get_size", |lua, this, _: ()| {

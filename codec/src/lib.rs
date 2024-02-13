@@ -13,7 +13,7 @@
 #![allow(clippy::range_plus_one)]
 
 use anyhow::{bail, Context as _, Error};
-use config::keyassignment::{PaneDirection, ScrollbackEraseMode};
+use config::keyassignment::{PaneDirection, RotationDirection, ScrollbackEraseMode};
 use mux::client::{ClientId, ClientInfo};
 use mux::pane::PaneId;
 use mux::renderable::{RenderableDimensions, StableCursorPosition};
@@ -442,7 +442,7 @@ macro_rules! pdu {
 /// The overall version of the codec.
 /// This must be bumped when backwards incompatible changes
 /// are made to the types and protocol.
-pub const CODEC_VERSION: usize = 46;
+pub const CODEC_VERSION: usize = 47;
 
 // Defines the Pdu enum.
 // Each struct has an explicit identifying number.
@@ -494,7 +494,7 @@ pdu! {
     GetPaneRenderableDimensions: 51,
     GetPaneRenderableDimensionsResponse: 52,
     PaneFocused: 53,
-    TabResized: 54,
+    TabReflowed: 54,
     TabAddedToWindow: 55,
     TabTitleChanged: 56,
     WindowTitleChanged: 57,
@@ -503,6 +503,8 @@ pdu! {
     GetPaneDirection: 60,
     GetPaneDirectionResponse: 61,
     AdjustPaneSize: 62,
+    RotatePanes: 63,
+    SwapActivePaneWithIndex: 64,
 }
 
 impl Pdu {
@@ -804,7 +806,7 @@ pub struct TabAddedToWindow {
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Debug)]
-pub struct TabResized {
+pub struct TabReflowed {
     pub tab_id: TabId,
 }
 
@@ -886,6 +888,19 @@ pub struct GetPaneDirectionResponse {
 pub struct ActivatePaneDirection {
     pub pane_id: PaneId,
     pub direction: PaneDirection,
+}
+
+#[derive(Deserialize, Serialize, PartialEq, Debug)]
+pub struct RotatePanes {
+    pub pane_id: PaneId,
+    pub direction: RotationDirection,
+}
+
+#[derive(Deserialize, Serialize, PartialEq, Debug)]
+pub struct SwapActivePaneWithIndex {
+    pub active_pane_id: PaneId,
+    pub with_pane_index: usize,
+    pub keep_focus: bool,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Debug)]
