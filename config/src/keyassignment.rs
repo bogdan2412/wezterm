@@ -292,6 +292,20 @@ impl PaneDirection {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromDynamic, ToDynamic)]
+pub struct SwapActivePaneDirectionArguments {
+    pub direction: PaneDirection,
+    pub keep_focus: bool,
+}
+impl_lua_conversion_dynamic!(SwapActivePaneDirectionArguments);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromDynamic, ToDynamic)]
+pub struct SwapActivePaneWithIndexArguments {
+    pub pane_index: usize,
+    pub keep_focus: bool,
+}
+impl_lua_conversion_dynamic!(SwapActivePaneWithIndexArguments);
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, FromDynamic, ToDynamic, Serialize, Deserialize)]
 pub enum ScrollbackEraseMode {
     ScrollbackOnly,
@@ -566,6 +580,8 @@ pub enum KeyAssignment {
     AdjustPaneSize(PaneDirection, usize),
     ActivatePaneDirection(PaneDirection),
     ActivatePaneByIndex(usize),
+    SwapActivePaneDirection(SwapActivePaneDirectionArguments),
+    SwapActivePaneWithIndex(SwapActivePaneWithIndexArguments),
     TogglePaneZoomState,
     SetPaneZoomState(bool),
     CloseCurrentPane {
