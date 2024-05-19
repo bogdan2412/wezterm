@@ -84,6 +84,8 @@ case $OSTYPE in
       security default-keychain -d user -s $def_keychain
       echo "Remove build.keychain"
       security delete-keychain build.keychain || true
+    else
+      /usr/bin/codesign --force --deep --sign - $zipdir/WezTerm.app/
     fi
 
     set -x

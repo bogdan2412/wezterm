@@ -626,14 +626,14 @@ rustup default {toolchain}
         patterns.append("*.sha256")
         glob = " ".join(patterns)
 
-        if self.container == "ubuntu:22.04":
-            steps += [
-                RunStep(
-                    "Upload to gemfury",
-                    f"for f in wezterm*.deb ; do curl -i -F package=@$f https://$FURY_TOKEN@push.fury.io/wez/ ; done",
-                    env={"FURY_TOKEN": "${{ secrets.FURY_TOKEN }}"},
-                ),
-            ]
+        # if self.container == "ubuntu:22.04":
+        #     steps += [
+        #         RunStep(
+        #             "Upload to gemfury",
+        #             f"for f in wezterm*.deb ; do curl -i -F package=@$f https://$FURY_TOKEN@push.fury.io/wez/ ; done",
+        #             env={"FURY_TOKEN": "${{ secrets.FURY_TOKEN }}"},
+        #         ),
+        #     ]
 
         return [
             ActionStep(
@@ -661,14 +661,14 @@ rustup default {toolchain}
         patterns.append("*.sha256")
         glob = " ".join(patterns)
 
-        if self.container == "ubuntu:22.04":
-            steps += [
-                RunStep(
-                    "Upload to gemfury",
-                    f"for f in wezterm*.deb ; do curl -i -F package=@$f https://$FURY_TOKEN@push.fury.io/wez/ ; done",
-                    env={"FURY_TOKEN": "${{ secrets.FURY_TOKEN }}"},
-                ),
-            ]
+        # if self.container == "ubuntu:22.04":
+        #     steps += [
+        #         RunStep(
+        #             "Upload to gemfury",
+        #             f"for f in wezterm*.deb ; do curl -i -F package=@$f https://$FURY_TOKEN@push.fury.io/wez/ ; done",
+        #             env={"FURY_TOKEN": "${{ secrets.FURY_TOKEN }}"},
+        #         ),
+        #     ]
 
         return steps + [
             ActionStep(
@@ -978,10 +978,10 @@ rustup default {toolchain}
         uploader = Job(
             runs_on="ubuntu-latest",
             steps=self.checkout(submodules=False)
-            + self.update_homebrew_tap()
+            # + self.update_homebrew_tap()
             + self.upload_asset_tag()
-            + self.create_winget_pr()
-            + self.create_flathub_pr(),
+            # + self.create_winget_pr()
+            # + self.create_flathub_pr(),
         )
 
         return (
@@ -1080,7 +1080,6 @@ jobs:
   upload:
     runs-on: ubuntu-latest
     needs: build
-    if: github.repository == 'wezterm/wezterm'
     permissions:
       contents: write
       pages: write
