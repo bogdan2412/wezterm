@@ -400,9 +400,12 @@ rustup default {toolchain}
                     params=params,
                 ),
             ]
-        if cache:
+        if cache and "win" not in self.name:
             steps += [
                 SccacheStep(name="Compile with sccache"),
+            ]
+        if cache:
+            steps += [
                 # Cache vendored dependencies
                 CacheStep(
                     name="Cache Rust Dependencies",
@@ -825,8 +828,13 @@ rustup default {toolchain}
 
     def global_env(self):
         self.env["CARGO_INCREMENTAL"] = "0"
-        self.env["SCCACHE_GHA_ENABLED"] = "true"
-        self.env["RUSTC_WRAPPER"] = "sccache"
+        if "win" in self.name:
+            # Let Cargo handle long commands until sccache releases the fix for
+            # https://github.com/mozilla/sccache/pull/3026 (Windows error 206).
+            self.env["RUSTC_WRAPPER"] = ""
+        else:
+            self.env["SCCACHE_GHA_ENABLED"] = "true"
+            self.env["RUSTC_WRAPPER"] = "sccache"
         if "macos" in self.name:
             self.env["MACOSX_DEPLOYMENT_TARGET"] = "10.12"
         if "alpine" in self.name:
